@@ -6,7 +6,6 @@ from crewai import Crew, Agent, Task
 from dotenv import load_dotenv
 import os
 from crewai import LLM
-
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -218,6 +217,7 @@ async def search_logs():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 @app.route('/analyze_logs', methods=['POST'])
 async def analyze_logs():
     try:
@@ -242,8 +242,8 @@ async def analyze_logs():
         # Process logs using CrewAI
         response = await asyncio.to_thread(log_analysis_crew.kickoff,
                                           inputs={"logs": logs_text})
-        future_errors = await asyncio.to_thread(chat_bot_crew.kickoff,
-                                          inputs={"query": "Give a list of potential future errors using the given logs"})
+        future_errors = await asyncio.to_thread(error_finder_crew.kickoff,
+                                          inputs={"logs": logs_text})
         
         # Return analysis results along with metadata about retrieved logs
         return jsonify({
@@ -274,8 +274,8 @@ async def chat(uinput):
         response = await asyncio.to_thread(
             chat_bot_crew.kickoff, 
             inputs={
-                "logs": str(logs_text),
-                "query": str(uinput)
+                "logs": logs_text,
+                "query": uinput
             }
         )
         return jsonify({
