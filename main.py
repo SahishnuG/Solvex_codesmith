@@ -11,15 +11,9 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import json
+import os
 from datetime import datetime
 from crewai_tools import SerperDevTool
-
-app = Quart(__name__)
-
-# ... your routes ...
-
-# For Vercel
-handler = app.asgi_app
 
 # Load environment variables
 load_dotenv()
@@ -57,6 +51,17 @@ chat_bot = Agent(
     llm=llm
 )
 
+error_finder = Agent(
+    role="Error finder",
+    goal="Use the given logs and try to predict future errors",
+    backstory="An expert log predictive analyser",
+    verbose=True,
+    memory=True,
+    allow_delegation=True,
+    tools=[serper_tool],
+    llm=llm
+)
+
 # --- Log Analysis Task ---
 log_analysis_task = Task(
     description="Analyze the provided logs and identify any errors, warnings, or anomalies: {logs}\n Provide a summary of key insights.",
@@ -70,6 +75,12 @@ chat_bot_task = Task(
     agent=chat_bot
 )
 
+error_finder_task = Task(
+    description="Analyze the provided logs and identify any potentential  errors: {logs}",
+    expected_output="A list of potential errors",
+    agent=error_finder
+)
+
 # --- Crew Setup ---
 log_analysis_crew = Crew(
     agents=[log_analyzer],
@@ -81,12 +92,18 @@ chat_bot_crew = Crew(
     tasks=[log_analysis_task, chat_bot_task]
 )
 
+error_finder_crew = Crew(
+    agents=[log_analyzer,error_finder],
+    tasks=[log_analysis_task, error_finder_task],
+    process="sequential"
+)
+
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 # Create or load FAISS index
 INDEX_DIMENSION = 384  # Dimension of the embeddings from the model
-INDEX_FILE = '/tmp/logs_index.faiss'
-META_FILE = '/tmp/logs_metadata.json'
+INDEX_FILE = 'logs_index.faiss'
+META_FILE = 'logs_metadata.json'
 
 # Initialize index and metadata
 if os.path.exists(INDEX_FILE):
@@ -201,7 +218,6 @@ async def search_logs():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route('/analyze_logs', methods=['POST'])
 async def analyze_logs():
     try:
@@ -226,12 +242,15 @@ async def analyze_logs():
         # Process logs using CrewAI
         response = await asyncio.to_thread(log_analysis_crew.kickoff,
                                           inputs={"logs": logs_text})
+        future_errors = await asyncio.to_thread(chat_bot_crew.kickoff,
+                                          inputs={"query": "Give a list of potential future errors using the given logs"})
         
         # Return analysis results along with metadata about retrieved logs
         return jsonify({
             "status": "success",
             "analysis": str(response),
             "logs_analyzed": len(logs),
+            "errors": str(future_errors),
             "search_results": log_results
         })
     except Exception as e:
@@ -255,8 +274,8 @@ async def chat(uinput):
         response = await asyncio.to_thread(
             chat_bot_crew.kickoff, 
             inputs={
-                "logs": logs_text,
-                "query": uinput
+                "logs": str(logs_text),
+                "query": str(uinput)
             }
         )
         return jsonify({
@@ -300,5 +319,6 @@ async def add_logs():
     except Exception as e:
         print(f"Error in add_logs: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-if __name__ == "__main__":
-    app.run()
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=5000, debug=True)
