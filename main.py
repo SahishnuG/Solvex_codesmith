@@ -14,6 +14,13 @@ import json
 from datetime import datetime
 from crewai_tools import SerperDevTool
 
+app = Quart(__name__)
+
+# ... your routes ...
+
+# For Vercel
+handler = app.asgi_app
+
 # Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') 
@@ -293,6 +300,5 @@ async def add_logs():
     except Exception as e:
         print(f"Error in add_logs: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5000, debug=True)
+if __name__ == "__main__":
+    app.run()
