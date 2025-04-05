@@ -3,24 +3,23 @@ from quart import Quart, request, jsonify
 from quart_cors import cors
 import asyncio
 from crewai import Crew, Agent, Task
+from crewai import LLM
 from dotenv import load_dotenv
 import os
-from crewai import LLM
-
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import json
-import os
 from datetime import datetime
+from langchain.tools import BaseTool
 from crewai_tools import SerperDevTool
+from typing import Optional, Type, Any, Dict, List, Union
 
 # Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') 
 os.environ['GEMINI_API_KEY'] = GEMINI_API_KEY if GEMINI_API_KEY else ""
-os.environ['SERPER_API_KEY']= os.getenv('SERPER_API_KEY')
-serper_tool= SerperDevTool()
+os.environ['SERPER_API_KEY'] = os.getenv('SERPER_API_KEY')
 
 # Initialize LLM
 try:
@@ -29,55 +28,8 @@ except Exception as e:
     print(f"Error initializing LLM: {e}")
     llm = None
 
-# --- Log Analysis Agent ---
-log_analyzer = Agent(
-    role="Log Analysis Bot",
-    goal="Analyze logs from multiple sources, detect anomalies, and provide insights. You are given the following logs",
-    backstory="A highly skilled AI specializing in log analysis, capable of detecting issues, anomalies, and trends across different logs.",
-    verbose=True,
-    memory=True,
-    allow_delegation=False,
-    tools=[serper_tool],
-    llm=llm
-)
-# ---Chat bot Agent ---
-chat_bot = Agent(
-    role="Chat bot",
-    goal="Use the given logs and log analysis and solve the users queries",
-    backstory="A friendly chat bot that solves all queries related to the given logs",
-    verbose=True,
-    memory=True,
-    allow_delegation=True,
-    llm=llm
-)
-
-# --- Log Analysis Task ---
-log_analysis_task = Task(
-    description="Analyze the provided logs and identify any errors, warnings, or anomalies: {logs}\n Provide a summary of key insights.",
-    expected_output="A detailed report of log anomalies, trends, and critical warnings.",
-    agent=log_analyzer
-)
-# --- Chat bot Task ---
-chat_bot_task = Task(
-    description="{query}",
-    expected_output="Response to the given user query",
-    agent=chat_bot
-)
-
-# --- Crew Setup ---
-log_analysis_crew = Crew(
-    agents=[log_analyzer],
-    tasks=[log_analysis_task]
-)
-
-chat_bot_crew = Crew(
-    agents=[log_analyzer, chat_bot],
-    tasks=[log_analysis_task, chat_bot_task]
-)
-
-
+# Initialize vector DB components
 model = SentenceTransformer('all-MiniLM-L6-v2')
-# Create or load FAISS index
 INDEX_DIMENSION = 384  # Dimension of the embeddings from the model
 INDEX_FILE = 'logs_index.faiss'
 META_FILE = 'logs_metadata.json'
@@ -91,6 +43,7 @@ else:
     index = faiss.IndexFlatL2(INDEX_DIMENSION)
     logs_metadata = []
 
+# Vector DB functions
 def add_logs_to_vector_db(logs, metadata=None):
     """
     Add logs to the vector database.
@@ -163,6 +116,114 @@ def search_logs_in_vector_db(query, k=5):
             results.append(result)
     
     return results
+
+# Custom tool classes
+class LogRetrievalTool(BaseTool):
+    name: str = "Log Retrieval Tool"
+    description: str = "Retrieve the most recent logs from the vector database."
+    
+    def _run(self, query: str = "", k: int = 10) -> str:
+        """
+        Retrieve the most recent logs from the vector database.
+        
+        Args:
+            query (str): Optional query parameter (not used for latest logs)
+            k (int): Number of recent logs to retrieve
+            
+        Returns:
+            str: Retrieved logs as a formatted string
+        """
+        global logs_metadata
+        
+        # Get the last k logs based on their ID (assuming higher ID = more recent)
+        # Sort logs by ID in descending order and take the first k
+        recent_logs = sorted(logs_metadata, key=lambda x: x["id"], reverse=True)[:k]
+        
+        if not recent_logs:
+            return "No logs found in the database."
+        
+        # Format results
+        formatted_logs = "Most Recent Logs:\n\n"
+        for i, result in enumerate(recent_logs):
+            formatted_logs += f"Log #{i+1}:\n"
+            formatted_logs += f"{result['log']}\n"
+            formatted_logs += f"(Timestamp: {result['timestamp']})\n\n"
+        
+        return formatted_logs
+    
+    async def _arun(self, query: str = "", k: int = 10) -> str:
+        """Async implementation of log retrieval"""
+        return self._run(query, k)
+
+class EnhancedSerperTool(SerperDevTool):
+    name: str = "Enhanced Search Tool"
+    description: str = "Search the web for information about technologies, errors, and solutions."
+    
+    def _run(self, query: str) -> str:
+        try:
+            result = super()._run(query)
+            return result
+        except Exception as e:
+            print(f"SerperDevTool error: {e}")
+            return f"Error using search tool: {str(e)}. Please try a different approach to answer the query."
+
+# Create INSTANCES of the tools (important!)
+log_retrieval_tool = LogRetrievalTool()
+enhanced_serper_tool = EnhancedSerperTool()
+
+# --- Log Analysis Agent ---
+log_analyzer = Agent(
+    role="Log Analysis Bot",
+    goal="Analyze logs from multiple sources, detect anomalies, and provide insights. You will retrieve relevant logs using the LogRetrievalTool.",
+    backstory="A highly skilled AI specializing in log analysis, capable of detecting issues, anomalies, and trends across different logs.",
+    verbose=True,
+    memory=True,
+    allow_delegation=False,
+    tools=[log_retrieval_tool, enhanced_serper_tool],  # Pass tool instances, not classes
+    llm=llm
+)
+
+# ---Chat bot Agent ---
+chat_bot = Agent(
+    role="Chat bot",
+    goal="Assist users with log-related queries by leveraging log analysis and retrieved log data",
+    backstory="A friendly chat bot that solves queries related to logs by using the analysis provided by the Log Analysis Bot and retrieving relevant logs directly.",
+    verbose=True,
+    memory=True,
+    allow_delegation=True,
+    tools=[log_retrieval_tool, enhanced_serper_tool],  # Pass tool instances, not classes
+    llm=llm
+)
+
+# --- Log Analysis Task ---
+log_analysis_task = Task(
+    description="Analyze logs related to: '{query}'. First, retrieve recent logs using the LogRetrievalTool. Then identify any errors, warnings, or anomalies. Provide a summary of key insights.",
+    expected_output="A detailed report of log anomalies, trends, and critical warnings based on the retrieved logs.",
+    agent=log_analyzer,
+    output_file="log_analysis_report.txt"  # Save the output for the chatbot to use
+)
+
+# --- Chat bot Task ---
+chat_bot_task = Task(
+    description="Answer the user's query: '{query}'. First, read the log analysis from the log_analysis_report.txt. Then use your LogRetrievalTool to get additional relevant logs if needed. Provide a comprehensive and helpful response.",
+    expected_output="A helpful response that addresses the user's query based on log analysis and relevant logs.",
+    agent=chat_bot,
+    context=[log_analysis_task]  # This provides context from the log analysis task
+)
+
+# --- Crew Setup ---
+log_analysis_crew = Crew(
+    agents=[log_analyzer],
+    tasks=[log_analysis_task],
+    verbose=True,  # Increase verbosity for debugging
+)
+
+chat_bot_crew = Crew(
+    agents=[log_analyzer, chat_bot],
+    tasks=[log_analysis_task, chat_bot_task],
+    verbose=True,  # Increase verbosity for debugging
+)
+
 # Create Quart app with CORS support
 app = Quart(__name__)
 app = cors(app)  # Enable CORS for all routes
@@ -195,45 +256,42 @@ async def search_logs():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route('/analyze_logs', methods=['POST'])
 async def analyze_logs():
     try:
-        # Use force=True to handle cases where Content-Type header is not set correctly
         data = await request.get_json(force=True)
         query = data.get("query")
-        limit = data.get("limit", 5)  # Default to retrieving 5 logs
         
         if not query:
             return jsonify({"status": "error", "message": "No query provided for log retrieval"}), 400
         
-        # Directly use the search_logs_in_vector_db function
-        log_results = search_logs_in_vector_db(query, limit)
+        # Process logs using CrewAI with the query
+        response = await asyncio.to_thread(
+            log_analysis_crew.kickoff,
+            inputs={"query": query}
+        )
         
-        if not log_results:
-            return jsonify({"status": "error", "message": "No matching logs found in database"}), 404
+        # Read the analysis file for verification
+        analysis_text = "Analysis not found"
+        try:
+            if os.path.exists("log_analysis_report.txt"):
+                with open("log_analysis_report.txt", "r") as f:
+                    analysis_text = f.read()
+        except Exception as e:
+            print(f"Error reading analysis file: {e}")
         
-        # Extract the actual log content from results
-        logs = [result["log"] for result in log_results]
-        logs_text = "\n".join(logs)
-        
-        # Process logs using CrewAI
-        response = await asyncio.to_thread(log_analysis_crew.kickoff,
-                                          inputs={"logs": logs_text})
-        
-        # Return analysis results along with metadata about retrieved logs
+        # Return analysis results
         return jsonify({
             "status": "success",
             "analysis": str(response),
-            "logs_analyzed": len(logs),
-            "search_results": log_results
+            "analysis_file_content": analysis_text
         })
     except Exception as e:
         print(f"Error in analyze_logs: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     
-@app.route('/chat/<uinput>', methods=['POST'])
-async def chat(uinput):
+@app.route('/chat', methods=['POST'])
+async def chat():
     try:
         data = await request.get_json(force=True)
         query = data.get("query")
@@ -241,22 +299,15 @@ async def chat(uinput):
         if not query:
             return jsonify({"status": "error", "message": "No query provided"}), 400
         
-        # First, get relevant logs
-        log_results = search_logs_in_vector_db(query, k=10)
-        logs_text = "\n".join([result["log"] for result in log_results])
-        
         # Use the chat_bot_crew to respond to the query
         response = await asyncio.to_thread(
             chat_bot_crew.kickoff, 
-            inputs={
-                "logs": logs_text,
-                "query": uinput
-            }
+            inputs={"query": query}
         )
+        
         return jsonify({
             "status": "success",
-            "response": str(response),
-            "related_logs_count": len(log_results)
+            "response": str(response)
         })
     
     except Exception as e:
@@ -266,7 +317,6 @@ async def chat(uinput):
 @app.route('/add_logs', methods=['POST'])
 async def add_logs():
     try:
-        # Use force=True to handle cases where Content-Type header is not set correctly
         data = await request.get_json(force=True)
         logs = data.get("logs", "")
         metadata = data.get("metadata", None)

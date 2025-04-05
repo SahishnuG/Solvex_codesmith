@@ -11,7 +11,6 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import json
-import os
 from datetime import datetime
 from crewai_tools import SerperDevTool
 
@@ -79,8 +78,8 @@ chat_bot_crew = Crew(
 model = SentenceTransformer('all-MiniLM-L6-v2')
 # Create or load FAISS index
 INDEX_DIMENSION = 384  # Dimension of the embeddings from the model
-INDEX_FILE = 'logs_index.faiss'
-META_FILE = 'logs_metadata.json'
+INDEX_FILE = '/tmp/logs_index.faiss'
+META_FILE = '/tmp/logs_metadata.json'
 
 # Initialize index and metadata
 if os.path.exists(INDEX_FILE):
